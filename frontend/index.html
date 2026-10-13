@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>得物决策助手</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=Syne:wght@600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/assets/style.css?v=20261013-2" />
+  </head>
+  <body>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <div class="bg-glow" aria-hidden="true"></div>
+
+    <header class="top">
+      <div class="brand">
+        <span class="brand-mark">得</span>
+        <div>
+          <h1>得物决策助手</h1>
+          <p>半自动搬砖 · 成本 / 利润 / 销量 / 建议</p>
+        </div>
+      </div>
+      <div class="status" id="connStatus">
+        <span class="dot"></span>
+        <span class="label">连接中…</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="panel toolbar">
+        <form id="skuForm" class="toolbar-form">
+          <div class="field">
+            <label for="skuInput">货号</label>
+            <input
+              id="skuInput"
+              name="sku"
+              type="text"
+              placeholder="例如 OC230246"
+              autocomplete="off"
+              required
+            />
+          </div>
+          <div class="field">
+            <label for="costInput">成本价</label>
+            <input
+              id="costInput"
+              type="number"
+              step="0.01"
+              min="0"
+              placeholder="元"
+            />
+          </div>
+          <button type="submit" id="skuBtn" class="primary-btn">查价</button>
+          <button type="button" id="cancelBtn" class="danger-btn" disabled>
+            终止
+          </button>
+
+          <div class="field field-sm">
+            <label for="minProfit">最低利润</label>
+            <input id="minProfit" type="number" step="1" value="30" min="0" />
+          </div>
+          <div class="field field-sm">
+            <label for="minSales7d">最低7日销量</label>
+            <input id="minSales7d" type="number" step="1" value="10" min="0" />
+          </div>
+        </form>
+
+        <div class="paste-row">
+          <div
+            id="pasteZone"
+            class="paste-zone"
+            tabindex="0"
+            role="button"
+            aria-label="粘贴或拖入商品图片识图查价"
+          >
+            <input id="imageInput" type="file" accept="image/*" hidden />
+            <div class="paste-preview" id="pastePreview" hidden>
+              <img id="pasteThumb" alt="预览" />
+              <button type="button" class="paste-clear" id="pasteClear" title="清除图片">
+                清除
+              </button>
+            </div>
+            <div class="paste-copy" id="pasteCopy">
+              <strong>识图查询</strong>
+              <span>Ctrl+V 粘贴 / 拖入 / 点击选图 · 选图后可点「清除」</span>
+            </div>
+          </div>
+          <button type="button" id="imageBtn" class="primary-btn" disabled>
+            识图查价
+          </button>
+        </div>
+        <p class="toolbar-tip">
+          利润 = 预计收入 − 成本；支持粘贴截图识图。若弹出「应用请求摄像头」，点「实时截取屏幕」一次即可（脚本也会尝试自动点掉）。保持模拟器前台可见。
+        </p>
+      </section>
+
+      <section class="panel results">
+        <div class="panel-head">
+          <h2>查价结果</h2>
+          <div class="result-actions">
+            <span class="history-count" id="historyCount">0 / 3</span>
+            <button type="button" class="icon-btn" id="soundToggle" role="switch" aria-checked="false" aria-label="完成提示音" title="开启完成提示音">
+              <i data-lucide="volume-x" aria-hidden="true"></i>
+            </button>
+            <button type="button" class="icon-btn" id="clearResultsBtn" aria-label="清空查询记录" title="清空查询记录">
+              <i data-lucide="trash-2" aria-hidden="true"></i>
+            </button>
+          </div>
+        </div>
+        <div class="task-status" id="taskStatus" data-state="idle" role="status" aria-live="polite" hidden>
+          <span class="task-symbol" id="taskSymbol"><i data-lucide="circle-dot" aria-hidden="true"></i></span>
+          <div class="task-copy">
+            <strong id="taskTitle">等待查询</strong>
+            <span id="taskDetail">暂无进行中的任务</span>
+          </div>
+          <span class="task-time" id="taskTime"></span>
+        </div>
+        <nav class="result-nav" id="resultNav" aria-label="最近查询" hidden>
+          <button type="button" class="icon-btn" id="resultPrev" aria-label="上一条查询" title="上一条查询">
+            <i data-lucide="chevron-left" aria-hidden="true"></i>
+          </button>
+          <div class="history-tabs" id="historyTabs" role="tablist" aria-label="最近三次查询"></div>
+          <span class="page-position" id="resultPosition"></span>
+          <button type="button" class="icon-btn" id="resultNext" aria-label="下一条查询" title="下一条查询">
+            <i data-lucide="chevron-right" aria-hidden="true"></i>
+          </button>
+        </nav>
+        <div id="results" class="cards empty-state">
+          <p>查询后结果会显示在这里</p>
+        </div>
+      </section>
+
+      <section class="panel live">
+        <div class="live-head">
+          <h2>执行过程</h2>
+          <button type="button" class="ghost" id="clearBtn">清空</button>
+        </div>
+        <ol class="feed" id="feed" aria-live="polite"></ol>
+      </section>
+    </main>
+
+    <div class="completion-toast" id="completionToast" role="status" aria-live="polite" hidden>
+      <span class="toast-symbol" id="toastSymbol"><i data-lucide="circle-check" aria-hidden="true"></i></span>
+      <div class="toast-copy">
+        <strong id="toastTitle"></strong>
+        <span id="toastDetail"></span>
+      </div>
+      <button type="button" class="toast-action" id="toastView">查看结果</button>
+      <button type="button" class="icon-btn" id="toastClose" aria-label="关闭完成提示" title="关闭完成提示">
+        <i data-lucide="x" aria-hidden="true"></i>
+      </button>
+    </div>
+
+    <div class="lightbox" id="lightbox" hidden>
+      <button type="button" class="lightbox-close" id="lightboxClose" aria-label="关闭">
+        ×
+      </button>
+      <img id="lightboxImg" alt="preview" />
+      <p class="lightbox-tip">点击空白处关闭</p>
+    </div>
+
+    <script src="/assets/lucide.min.js"></script>
+    <script src="/assets/app.js?v=20261013-2"></script>
+  </body>
+</html>

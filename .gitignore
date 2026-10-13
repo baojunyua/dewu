@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+uploads/
+screenshots/
+logs/
+dump_sales.xml
+dump_sales_texts.txt
+.pytest_cache/
+*.png
+.idea/
+.DS_Store
