@@ -4,13 +4,6 @@ const connStatus = document.getElementById("connStatus");
 const skuForm = document.getElementById("skuForm");
 const skuBtn = document.getElementById("skuBtn");
 const cancelBtn = document.getElementById("cancelBtn");
-const imageBtn = document.getElementById("imageBtn");
-const imageInput = document.getElementById("imageInput");
-const pasteZone = document.getElementById("pasteZone");
-const pastePreview = document.getElementById("pastePreview");
-const pasteThumb = document.getElementById("pasteThumb");
-const pasteCopy = document.getElementById("pasteCopy");
-const pasteClear = document.getElementById("pasteClear");
 const clearBtn = document.getElementById("clearBtn");
 const clearResultsBtn = document.getElementById("clearResultsBtn");
 const lightbox = document.getElementById("lightbox");
@@ -32,8 +25,6 @@ const taskTime = document.getElementById("taskTime");
 const soundToggle = document.getElementById("soundToggle");
 const completionToast = document.getElementById("completionToast");
 
-let selectedFile = null;
-let previewUrl = null;
 let busy = false;
 let busyMode = null; // "sku" | "image" | null
 let ws;
@@ -43,7 +34,6 @@ const resultCards = new Map();
 const completedJobs = new Set();
 let activeJobId = null;
 const MAX_RESULTS = 3;
-const ROWS_PER_PAGE = 8;
 let resultHistory = [];
 let selectedResultId = null;
 let taskStartedAt = 0;
@@ -194,7 +184,6 @@ function renderHistoryNav() {
 }
 
 const SKU_BTN_LABEL = "查价";
-const IMAGE_BTN_LABEL = "识图查价";
 
 function setConn(state, text) {
   connStatus.classList.remove("online", "offline");
@@ -236,12 +225,8 @@ function setBusy(v, mode = null) {
     cancelBtn.disabled = !busy;
     cancelBtn.classList.toggle("is-armed", busy);
   }
-  imageBtn.disabled = busy || !selectedFile;
-
   const skuRunning = busy && busyMode === "sku";
-  const imageRunning = busy && busyMode === "image";
   skuBtn.classList.toggle("is-running", skuRunning);
-  imageBtn.classList.toggle("is-running", imageRunning);
 
   if (skuRunning) {
     skuBtn.innerHTML = renderRunningLabel("查询中");
@@ -249,11 +234,6 @@ function setBusy(v, mode = null) {
     skuBtn.textContent = SKU_BTN_LABEL;
   }
 
-  if (imageRunning) {
-    imageBtn.innerHTML = renderRunningLabel("识图中");
-  } else {
-    imageBtn.textContent = IMAGE_BTN_LABEL;
-  }
 }
 
 function openLightbox(src) {
@@ -434,6 +414,28 @@ function nonNegativeNumber(value) {
   return Number.isFinite(number) && number >= 0 ? number : null;
 }
 
+function qualifiedRecommendation(profit, sales7d) {
+  if (profit >= 60 && sales7d >= 300) {
+    return { grade: "invincible", label: "无敌", rule: "利润 ≥ ¥60，7日销量 ≥ 300" };
+  }
+  if (profit >= 100 && sales7d >= 140) {
+    return { grade: "luxury", label: "豪车", rule: "利润 ≥ ¥100，7日销量 ≥ 140" };
+  }
+  if (profit >= 100) {
+    return { grade: "slow", label: "高利慢销", rule: "利润 ≥ ¥100，7日销量 < 140" };
+  }
+  if (profit >= 60 && sales7d >= 140) {
+    return { grade: "fast", label: "快车", rule: "利润 ≥ ¥60，140 ≤ 7日销量 < 300" };
+  }
+  if (sales7d >= 300) {
+    return { grade: "volume", label: "薄利快销", rule: "利润 < ¥60，7日销量 ≥ 300" };
+  }
+  if (sales7d >= 140) {
+    return { grade: "popular", label: "畅销车", rule: "利润 < ¥60，140 ≤ 7日销量 < 300" };
+  }
+  return { grade: "good", label: "好车", rule: "利润、7日销量均达最低门槛" };
+}
+
 function buildDecisionRows(data, cost) {
   const rules = getRules();
   const sizes = Array.isArray(data.size_prices) ? data.size_prices : [];
@@ -443,6 +445,7 @@ function buildDecisionRows(data, cost) {
     const profit =
       income != null && hasCost ? Math.round((income - cost) * 100) / 100 : null;
     const sales = salesOf(data, row.size);
+    let grade = null;
     let state, label, reason;
     if (!hasCost) {
       state = "cost_missing";
@@ -470,8 +473,9 @@ function buildDecisionRows(data, cost) {
       reason = `7日销量 ${sales.d7}，低于最低销量 ${rules.minSales7d}`;
     } else {
       state = "buy";
-      label = "建议买";
-      reason = `利润 ¥${formatPrice(profit)} ≥ ¥${formatPrice(rules.minProfit)}，7日销量 ${sales.d7} ≥ ${rules.minSales7d}`;
+      const recommendation = qualifiedRecommendation(profit, sales.d7);
+      ({ grade, label } = recommendation);
+      reason = `${recommendation.rule}；实际利润 ¥${formatPrice(profit)}，7日销量 ${sales.d7}；最低门槛 ¥${formatPrice(rules.minProfit)} / ${rules.minSales7d} 单`;
     }
     return {
       size: row.size,
@@ -481,13 +485,14 @@ function buildDecisionRows(data, cost) {
       sales,
       buy: state === "buy",
       state,
+      grade,
       label,
       reason,
     };
   });
 }
 
-function renderDecision(data, cost, pageState = { page: 0 }) {
+function renderDecision(data, cost) {
   const rows = buildDecisionRows(data, cost);
   const rules = getRules();
   const sizeCount = Array.isArray(data.size_prices) ? data.size_prices.length : 0;
@@ -516,6 +521,11 @@ function renderDecision(data, cost, pageState = { page: 0 }) {
     (r) => r.profit != null && r.profit >= rules.minProfit
   );
   const buys = qualified.filter((r) => r.buy);
+  const gradeCounts = new Map();
+  for (const row of buys) gradeCounts.set(row.label, (gradeCounts.get(row.label) || 0) + 1);
+  const gradeSummary = ["无敌", "豪车", "快车", "畅销车", "薄利快销", "高利慢销", "好车"]
+    .filter(label => gradeCounts.has(label))
+    .map(label => `<span class="grade-count">${label} ${gradeCounts.get(label)} 个</span>`).join(" · ");
   const unverified = qualified.filter((r) => r.state === "sales_missing").length;
 
   const summary = !Number.isFinite(cost)
@@ -524,7 +534,7 @@ function renderDecision(data, cost, pageState = { page: 0 }) {
       ? data.pending_sales
         ? `<div class="advise-banner skip">利润达标 ${qualified.length} 个尺码 · 等待商家销量，暂不生成建议</div>`
         : `<div class="advise-banner ${buys.length ? "buy" : "skip"}">利润达标 ${qualified.length} 个尺码 · ${
-          buys.length ? `建议买 ${buys.length} 个` : unverified === qualified.length ? "销量缺失，暂不能判断" : "暂无同时满足销量阈值的建议"
+          buys.length ? gradeSummary : unverified === qualified.length ? "销量缺失，暂不能判断" : "暂无同时满足销量阈值的建议"
         }${unverified ? ` · ${unverified} 个销量待核实` : ""}</div>`
       : `<div class="advise-banner skip">暂无利润≥${rules.minProfit} 的尺码（已采集 ${sizeCount} 码）</div>`;
   const status = data.pending_sales
@@ -545,7 +555,7 @@ function renderDecision(data, cost, pageState = { page: 0 }) {
           profitText
         )}</td>
         <td class="num col-sales">${escapeHtml(formatCount(r.sales.d7))}</td>
-        <td class="col-advise"><span class="tag ${r.buy ? "tag-buy" : "tag-skip"}" title="${escapeHtml(r.reason)}" aria-label="${escapeHtml(`${r.label}：${r.reason}`)}">${escapeHtml(r.label)}</span>${
+        <td class="col-advise"><span class="tag ${r.buy ? "tag-buy" : "tag-skip"}"${r.grade ? ` data-grade="${r.grade}"` : ""} title="${escapeHtml(r.reason)}" aria-label="${escapeHtml(`${r.label}：${r.reason}`)}">${escapeHtml(r.label)}</span>${
           r.state === "sales_low" || r.state === "profit_low"
             ? `<small class="advice-reason">${r.state === "sales_low" ? "销量不足" : "利润不足"}</small>`
             : ""
@@ -574,20 +584,15 @@ function renderDecision(data, cost, pageState = { page: 0 }) {
     </div>`;
   };
 
-  const visibleRows = Number.isFinite(cost) ? qualified : rows;
-  const pages = Math.max(1, Math.ceil(visibleRows.length / ROWS_PER_PAGE));
-  pageState.page = Math.max(0, Math.min(pageState.page, pages - 1));
-  const start = pageState.page * ROWS_PER_PAGE;
-  const tablesHtml = makeTable(visibleRows.slice(start, start + ROWS_PER_PAGE));
-  const pager = pages > 1 ? `<nav class="size-pager" aria-label="尺码分页">
-    <span>${start + 1}–${Math.min(start + ROWS_PER_PAGE, visibleRows.length)} / ${visibleRows.length} 个尺码</span>
-    <div class="pager-controls">
-      <button type="button" class="icon-btn" data-size-prev aria-label="上一页尺码" title="上一页尺码" ${pageState.page === 0 ? "disabled" : ""}>${icon("chevron-left")}</button>
-      <span class="page-position">${pageState.page + 1} / ${pages}</span>
-      <button type="button" class="icon-btn" data-size-next aria-label="下一页尺码" title="下一页尺码" ${pageState.page === pages - 1 ? "disabled" : ""}>${icon("chevron-right")}</button>
-    </div>
-  </nav>` : "";
-  return `${status}${summary}<div class="decision-page${pages > 1 ? " is-paged" : ""}">${tablesHtml}</div>${pager}`;
+  const visibleRows = (Number.isFinite(cost) ? qualified : rows).slice().sort((a, b) => {
+    const salesA = a.sales.d7 ?? -1;
+    const salesB = b.sales.d7 ?? -1;
+    if (salesA !== salesB) return salesB - salesA;
+    const profitA = a.profit ?? -Infinity;
+    const profitB = b.profit ?? -Infinity;
+    return profitA === profitB ? 0 : profitB - profitA;
+  });
+  return `${status}${summary}${makeTable(visibleRows)}`;
 }
 
 function prependResult(data) {
@@ -654,20 +659,8 @@ function prependResult(data) {
 
   const host = card.querySelector(".decision-host");
   const previous = resultCards.get(id);
-  const pageState = previous?._pageState || { page: 0 };
-  card._pageState = pageState;
   function refresh() {
-    host.innerHTML = renderDecision(data, getCost(), pageState);
-    host.querySelector("[data-size-prev]")?.addEventListener("click", () => {
-      pageState.page--;
-      refresh();
-      host.querySelector("[data-size-prev]")?.focus({ preventScroll: true });
-    });
-    host.querySelector("[data-size-next]")?.addEventListener("click", () => {
-      pageState.page++;
-      refresh();
-      host.querySelector("[data-size-next]")?.focus({ preventScroll: true });
-    });
+    host.innerHTML = renderDecision(data, getCost());
     icons();
   }
   card._refreshDecision = refresh;
@@ -722,6 +715,8 @@ function refreshAllDecisions() {
 
 minProfitInput?.addEventListener("change", refreshAllDecisions);
 minSales7dInput?.addEventListener("change", refreshAllDecisions);
+minProfitInput?.addEventListener("input", refreshAllDecisions);
+minSales7dInput?.addEventListener("input", refreshAllDecisions);
 costInputGlobal?.addEventListener("change", refreshAllDecisions);
 costInputGlobal?.addEventListener("input", refreshAllDecisions);
 
@@ -750,128 +745,6 @@ skuForm.addEventListener("submit", async (e) => {
     setBusy(false);
   }
 });
-
-function revokePreview() {
-  if (previewUrl) {
-    URL.revokeObjectURL(previewUrl);
-    previewUrl = null;
-  }
-}
-
-function updateFile(file, { autoSubmit = false } = {}) {
-  selectedFile = file || null;
-  revokePreview();
-
-  if (selectedFile) {
-    previewUrl = URL.createObjectURL(selectedFile);
-    pasteThumb.src = previewUrl;
-    pastePreview.hidden = false;
-    pasteCopy.querySelector("strong").textContent = "已选图片";
-    const shortName =
-      selectedFile.name.length > 28
-        ? selectedFile.name.slice(0, 28) + "…"
-        : selectedFile.name;
-    pasteCopy.querySelector("span").textContent =
-      shortName + " · 点右上角「清除」可换图";
-    pasteZone.classList.add("has-file");
-  } else {
-    pasteThumb.removeAttribute("src");
-    pastePreview.hidden = true;
-    pasteCopy.querySelector("strong").textContent = "识图查询";
-    pasteCopy.querySelector("span").textContent =
-      "Ctrl+V 粘贴 / 拖入 / 点击选图 · 选图后可点「清除」";
-    pasteZone.classList.remove("has-file");
-    if (imageInput) imageInput.value = "";
-  }
-
-  imageBtn.disabled = busy || !selectedFile;
-
-  if (autoSubmit && selectedFile && !busy) {
-    submitImageQuery();
-  }
-}
-
-function fileFromClipboard(items) {
-  if (!items) return null;
-  for (const item of items) {
-    if (item.type && item.type.startsWith("image/")) {
-      const blob = item.getAsFile?.();
-      if (blob instanceof Blob) {
-        const ext = (blob.type.split("/")[1] || "png").replace("jpeg", "jpg");
-        return new File([blob], `paste-${Date.now()}.${ext}`, {
-          type: blob.type || "image/png",
-        });
-      }
-    }
-  }
-  return null;
-}
-
-async function submitImageQuery() {
-  if (busy || !selectedFile) return;
-  setBusy(true, "image");
-  prepareSound();
-  beginTask(selectedFile.name);
-  addFeed("progress", "本地", `识图上传 ${selectedFile.name}`);
-  try {
-    const fd = new FormData();
-    fd.append("file", selectedFile);
-    const res = await fetch("/api/query/image", { method: "POST", body: fd });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || data.message || `HTTP ${res.status}`);
-    handleEvent("result", data);
-  } catch (err) {
-    addFeed("result-fail", "请求失败", String(err));
-    finishTask({ ok: false, query: selectedFile.name, message: String(err), elapsed_ms: Date.now() - taskStartedAt });
-  } finally {
-    setBusy(false);
-  }
-}
-
-imageInput.addEventListener("change", () => {
-  updateFile(imageInput.files?.[0] || null);
-});
-
-pasteZone.addEventListener("click", (e) => {
-  if (e.target.closest(".paste-clear")) return;
-  imageInput.click();
-});
-
-pasteClear.addEventListener("click", (e) => {
-  e.preventDefault();
-  e.stopPropagation();
-  updateFile(null);
-});
-
-pasteZone.addEventListener("dragover", (e) => {
-  e.preventDefault();
-  pasteZone.classList.add("dragover");
-});
-
-pasteZone.addEventListener("dragleave", () => {
-  pasteZone.classList.remove("dragover");
-});
-
-pasteZone.addEventListener("drop", (e) => {
-  e.preventDefault();
-  pasteZone.classList.remove("dragover");
-  const file = e.dataTransfer?.files?.[0];
-  if (file && file.type.startsWith("image/")) {
-    updateFile(file, { autoSubmit: true });
-  } else {
-    addFeed("result-fail", "识图", "请拖入图片文件");
-  }
-});
-
-document.addEventListener("paste", (e) => {
-  const file = fileFromClipboard(e.clipboardData?.items);
-  if (!file) return;
-  e.preventDefault();
-  updateFile(file, { autoSubmit: true });
-  addFeed("progress", "本地", "已粘贴图片，开始识图查价");
-});
-
-imageBtn.addEventListener("click", () => submitImageQuery());
 
 cancelBtn?.addEventListener("click", async () => {
   if (!busy) return;

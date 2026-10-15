@@ -5,6 +5,7 @@ const vm = require("node:vm");
 
 const elements = new Map();
 const storage = new Map();
+const removedInputs = new Set(["imageBtn", "imageInput", "pasteZone", "pastePreview", "pasteThumb", "pasteCopy", "pasteClear"]);
 let soundStarts = 0;
 class FakeElement {
   constructor() {
@@ -28,7 +29,9 @@ class FakeElement {
     if (!this.selectors.has(selector)) this.selectors.set(selector, new FakeElement());
     return this.selectors.get(selector);
   }
-  querySelectorAll() { return []; }
+  querySelectorAll(selector) {
+    return selector === ".card[data-result]" ? this.children.filter(child => child.dataset.result) : [];
+  }
   prepend(child) { child.parent = this; child.isConnected = true; this.children.unshift(child); }
   remove() {
     if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this);
@@ -43,6 +46,7 @@ class FakeElement {
   }
 }
 function element(id) {
+  if (removedInputs.has(id)) return null;
   if (!elements.has(id)) elements.set(id, new FakeElement());
   return elements.get(id);
 }
@@ -62,6 +66,12 @@ const context = vm.createContext({
 vm.runInContext(fs.readFileSync(path.join(__dirname, "../frontend/assets/app.js"), "utf8"), context);
 const run = (code) => vm.runInContext(code, context);
 
+const html = fs.readFileSync(path.join(__dirname, "../frontend/index.html"), "utf8");
+assert.doesNotMatch(html, /pasteZone|imageInput|imageBtn|toolbar-tip|识图查询|利润 =/);
+run("setBusy(true,'sku')");
+assert.equal(element("skuBtn").disabled, true);
+run("setBusy(false)");
+assert.equal(element("skuBtn").disabled, false);
 assert.ok(Number.isNaN(run("getCost()")), "empty cost must not become zero");
 element("costInput").value = "0";
 assert.equal(run("getCost()"), 0);
@@ -107,6 +117,40 @@ assert.equal(run(`buildDecisionRows(${boundary},233.46)[0].profit`), 30);
 assert.equal(run(`buildDecisionRows(${boundary},233.46)[0].buy`), true, "exact profit/sales thresholds must qualify despite floating-point rounding");
 assert.equal(run(`buildDecisionRows(${boundary},0)[0].buy`), true);
 
+function advice(profit, sales, extra = "", cost = "300") {
+  return run(`buildDecisionRows({
+    sales_source:'merchant_7d', size_prices:[{size:'42',price:${300 + profit}}],
+    sales_by_size:{'42':{sales_7d:${sales}}}${extra}
+  },${cost})[0]`);
+}
+for (const [profit, sales, label] of [
+  [30,10,"好车"], [59.99,139,"好车"], [59.99,140,"畅销车"],
+  [59.99,299,"畅销车"], [59.99,300,"薄利快销"],
+  [60,139,"好车"], [60,140,"快车"], [99.99,299,"快车"],
+  [60,300,"无敌"], [100,139,"高利慢销"], [100,140,"豪车"],
+  [100,299,"豪车"], [100,300,"无敌"], [150,500,"无敌"],
+]) {
+  const result = advice(profit, sales);
+  assert.equal(result.label, label, `profit=${profit}, sales=${sales}`);
+  assert.equal(result.buy, true);
+  assert.ok(result.grade);
+}
+assert.equal(advice(29.99,500).state, "profit_low");
+assert.equal(advice(150,9).state, "sales_low");
+assert.equal(advice(150,"null").grade, null);
+assert.equal(advice(150,500,",pending_sales:true").grade, null);
+assert.equal(advice(150,500,"","NaN").grade, null);
+element("minProfit").value = "120";
+assert.equal(advice(100,300).state, "profit_low", "custom gates override grades");
+element("minProfit").value = "30";
+element("minSales7d").value = "400";
+assert.equal(advice(100,300).state, "sales_low");
+element("minSales7d").value = "10";
+assert.match(run(`renderDecision({
+  sales_source:'merchant_7d',size_prices:[{size:'42',price:400}],
+  sales_by_size:{'42':{sales_7d:300}}
+},300)`), /无敌 1 个/);
+
 for (let index = 1; index <= 4; index++) {
   run(`prependResult({job_id:'job-${index}',query:'SKU-${index}',ok:true,size_prices:[]})`);
 }
@@ -128,17 +172,53 @@ assert.equal(element("resultNext").disabled, true);
 element("resultPrev").listeners.click();
 assert.equal(run("selectedResultId"), "job-3");
 
-run("var many = {size_prices:Array.from({length:13},(_,i)=>({size:String(36+i),price:400+i}))}; var page={page:0}");
+run("var many = {size_prices:Array.from({length:13},(_,i)=>({size:String(36+i),price:400+i}))}");
 element("costInput").value = "";
-let markup = run("renderDecision(many,NaN,page)");
-assert.equal((markup.match(/<tr class=/g) || []).length, 8);
-assert.match(markup, /1–8 \/ 13/);
-run("page.page=1");
-markup = run("renderDecision(many,NaN,page)");
-assert.equal((markup.match(/<tr class=/g) || []).length, 5);
-assert.match(markup, /9–13 \/ 13/);
-run("renderDecision(many,500,page)");
-assert.equal(run("page.page"), 0, "filter changes clamp the page");
+let markup = run("renderDecision(many,NaN)");
+assert.equal((markup.match(/<tr class=/g) || []).length, 13);
+assert.doesNotMatch(markup, /size-pager|data-size-prev|data-size-next/);
+markup = run("renderDecision(many,300)");
+assert.equal((markup.match(/<tr class=/g) || []).length, 13);
+assert.ok(markup.indexOf(">48</td>") < markup.indexOf(">36</td>"), "equal sales use profit as tiebreaker");
+run(`var ranked = {
+  sales_source:'merchant_7d',
+  size_prices:[{size:'39',price:450},{size:'40',price:500},{size:'41',price:330},{size:'42',price:600},{size:'43',price:450},{size:'44',price:null}],
+  sales_by_size:{'39':{sales_7d:10},'40':{sales_7d:0},'41':{sales_7d:80},'43':{sales_7d:0},'44':{sales_7d:90}}
+}`);
+function renderedSizes(html) {
+  return [...html.matchAll(/<td class="col-size num">([^<]+)<\/td>/g)].map(match => match[1]);
+}
+assert.deepEqual(renderedSizes(run("renderDecision(ranked,300)")), ["41","39","40","43","42"],
+  "profit threshold only; higher sales win even with lower qualifying profit, unknown sales last");
+assert.deepEqual(renderedSizes(run("renderDecision(ranked,NaN)")), ["44","41","39","40","43","42"],
+  "without cost, sort by sales and keep source order for ties");
+assert.deepEqual(renderedSizes(run("renderDecision({...ranked,pending_sales:true},300)")), ["41","39","40","43","42"]);
+element("costInput").value = "300";
+run("prependResult({...ranked,job_id:'ranking-update',query:'RANK',ok:true})");
+const rankingMarkup = () => run("resultCards.get('ranking-update').querySelector('.decision-host').innerHTML");
+assert.deepEqual(renderedSizes(rankingMarkup()), ["41","39","40","43","42"]);
+element("minSales7d").value = "0";
+element("minSales7d").listeners.input();
+assert.deepEqual(renderedSizes(rankingMarkup()), ["41","39","40","43","42"],
+  "sales threshold changes recommendations, never sales-first ranking");
+element("minSales7d").value = "10";
+element("minSales7d").listeners.input();
+element("minProfit").value = "31";
+element("minProfit").listeners.input();
+assert.deepEqual(renderedSizes(rankingMarkup()), ["39","40","43","42"],
+  "raising profit threshold removes a now-unqualified high-sales size");
+element("minProfit").value = "30";
+element("minProfit").listeners.input();
+assert.deepEqual(renderedSizes(rankingMarkup()), ["41","39","40","43","42"]);
+run("prependResult({...ranked,job_id:'ranking-update',query:'RANK',ok:true,pending_sales:true})");
+assert.deepEqual(renderedSizes(rankingMarkup()), ["41","39","40","43","42"]);
+run("prependResult({...ranked,sales_by_size:{},job_id:'ranking-update',query:'RANK',ok:true,pending_sales:true})");
+assert.deepEqual(renderedSizes(rankingMarkup()), ["42","40","39","43","41"]);
+run("prependResult({...ranked,job_id:'ranking-update',query:'RANK',ok:true})");
+assert.deepEqual(renderedSizes(rankingMarkup()), ["41","39","40","43","42"],
+  "final merchant sales reorder the existing result");
+assert.match(run("renderDecision(many,500)"), /无达标尺码/);
+assert.equal(run("many.size_prices[0].size"), "36", "sorting must not mutate source data");
 assert.equal(element("soundToggle").attributes["aria-checked"], "false");
 element("soundToggle").listeners.click();
 assert.equal(element("soundToggle").attributes["aria-checked"], "true");
@@ -177,4 +257,4 @@ element("clearResultsBtn").listeners.click();
 assert.equal(run("resultHistory.length"), 0);
 assert.equal(run("resultCards.size"), 0);
 assert.equal(element("resultNav").hidden, true);
-console.log("Frontend tests passed: decisions, three-result retention, paging, completion status, sound and deduplication.");
+console.log("Frontend tests passed: decisions, three-result retention, single-page sizes, profit/sales ranking, completion status, sound and deduplication.");

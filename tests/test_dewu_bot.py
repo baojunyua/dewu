@@ -135,6 +135,88 @@ class BotTests(unittest.TestCase):
             self.bot._open_result_at(1)
         self.bot._d.click.assert_not_called()
 
+    def huozhi_search_xml(self, recorded_selected=True, include_all=True):
+        root = ET.Element("hierarchy")
+        node(root, "ARPW009-2", bounds="[100,45][550,110]",
+             **{"class": "android.widget.EditText"})
+        if include_all:
+            node(root, "全部", bounds="[45,130][160,178]",
+                 selected=str(not recorded_selected).lower())
+        node(root, "已录入商品", bounds="[180,130][360,178]",
+             selected=str(recorded_selected).lower())
+        return ET.tostring(root, encoding="unicode")
+
+    def configure_huozhi_device(self):
+        self.bot._d = Mock()
+        self.bot._d.window_size.return_value = (667, 1080)
+        self.bot._sleep = Mock()
+
+    def test_huozhi_switches_from_recorded_to_all(self):
+        self.configure_huozhi_device()
+        self.bot._page_text = Mock(side_effect=[
+            self.huozhi_search_xml(), self.huozhi_search_xml(False),
+        ])
+        self.assertTrue(self.bot._select_all_huozhi_products())
+        self.bot._d.click.assert_called_once_with(102, 154)
+
+    def test_huozhi_keeps_already_selected_all(self):
+        self.configure_huozhi_device()
+        self.bot._page_text = Mock(return_value=self.huozhi_search_xml(False))
+        self.assertTrue(self.bot._select_all_huozhi_products())
+        self.bot._d.click.assert_not_called()
+
+    def test_huozhi_does_not_search_recorded_when_all_is_missing(self):
+        self.configure_huozhi_device()
+        self.bot._page_text = Mock(return_value=self.huozhi_search_xml(include_all=False))
+        self.assertFalse(self.bot._select_all_huozhi_products())
+        self.bot._d.click.assert_not_called()
+
+    def test_huozhi_reports_failed_filter_switch(self):
+        self.configure_huozhi_device()
+        self.bot._page_text = Mock(return_value=self.huozhi_search_xml())
+        with patch.object(self.bot, "_wait_until", side_effect=lambda predicate, **kw: predicate()):
+            self.assertFalse(self.bot._select_all_huozhi_products())
+
+    def test_huozhi_selects_all_before_submit_and_after_results_appear(self):
+        self.configure_huozhi_device()
+        result = ET.fromstring(self.huozhi_search_xml(False))
+        node(result, "ARPW009-2", bounds="[180,355][310,388]")
+        self.bot._page_text = Mock(return_value=ET.tostring(result, encoding="unicode"))
+        events = []
+        edit = Mock()
+        submit = Mock()
+        submit.click.side_effect = lambda: events.append("submit")
+        self.bot._d.side_effect = lambda **kw: (
+            edit if kw.get("className") == "android.widget.EditText" else submit
+        )
+        self.bot._select_all_huozhi_products = Mock(
+            side_effect=lambda progress: events.append("all") or True
+        )
+        with patch("backend.dewu_bot.time.sleep"):
+            self.assertTrue(self.bot._search_huozhi_sku("ARPW009-2"))
+        self.assertEqual(events, ["all", "submit", "all"])
+
+    def test_huozhi_search_input_alone_is_not_a_product_result(self):
+        self.configure_huozhi_device()
+        self.bot._page_text = Mock(return_value=self.huozhi_search_xml(False))
+        self.bot._select_all_huozhi_products = Mock(return_value=True)
+        with patch("backend.dewu_bot.time.sleep"):
+            self.assertFalse(self.bot._search_huozhi_sku("ARPW009-2"))
+        self.assertEqual(self.bot._select_all_huozhi_products.call_count, 2)
+
+    def test_huozhi_waits_for_product_without_reclicking_all(self):
+        self.configure_huozhi_device()
+        loading = self.huozhi_search_xml(False)
+        result = ET.fromstring(loading)
+        node(result, "ARPW009-2", bounds="[180,355][310,388]")
+        self.bot._page_text = Mock(side_effect=[
+            loading, loading, loading, ET.tostring(result, encoding="unicode"),
+        ])
+        self.bot._select_all_huozhi_products = Mock(return_value=True)
+        with patch("backend.dewu_bot.time.sleep"):
+            self.assertTrue(self.bot._search_huozhi_sku("ARPW009-2"))
+        self.assertEqual(self.bot._select_all_huozhi_products.call_count, 2)
+
     def test_wait_is_cancellable(self):
         self.bot.request_cancel()
         with self.assertRaises(JobCancelled):
@@ -236,6 +318,41 @@ class BotTests(unittest.TestCase):
         self.assertEqual(result.sales_source, "merchant_7d")
         self.assertEqual(result.sales_by_size["39"]["sales_7d"], 0)
         self.assertEqual(result.recent_trades, [])
+
+    def test_merchant_collection_does_not_reclick_active_market_tab(self):
+        self.configure_huozhi_device()
+        self.bot._page_text = Mock(return_value="<hierarchy>规格销量排序</hierarchy>")
+        self.bot._extract_merchant_size_sales = Mock(return_value={"42": {"sales_7d": 133}})
+        self.bot._tap_visible_node_text = Mock()
+        with patch("backend.dewu_bot.time.sleep"):
+            self.assertEqual(
+                self.bot._collect_merchant_size_sales_with_scroll(),
+                {"42": {"sales_7d": 133}},
+            )
+        self.bot._tap_visible_node_text.assert_not_called()
+
+    def test_merchant_collection_reads_first_screen_before_swiping(self):
+        self.configure_huozhi_device()
+        self.bot._page_text = Mock(return_value="<hierarchy>规格销量排序</hierarchy>")
+        self.bot._extract_merchant_size_sales = Mock(side_effect=[
+            {"42": {"sales_7d": 133}}, {}, {}, {},
+        ])
+        with patch("backend.dewu_bot.time.sleep"):
+            self.assertEqual(
+                self.bot._collect_merchant_size_sales_with_scroll(),
+                {"42": {"sales_7d": 133}},
+            )
+
+    def test_huozhi_entry_is_scrolled_into_view(self):
+        self.configure_huozhi_device()
+        root = ET.Element("hierarchy")
+        node(root, "货值计算", bounds="[300,700][400,750]")
+        self.bot._page_text = Mock(side_effect=[
+            "<hierarchy/>", "<hierarchy/>", ET.tostring(root, encoding="unicode"),
+        ])
+        self.assertTrue(self.bot._open_huozhi())
+        self.bot._d.swipe.assert_called_once()
+        self.bot._d.click.assert_called_once_with(350, 725)
 
     def test_grid_collection_never_pulls_down_sheet_header(self):
         self.bot._d = Mock()

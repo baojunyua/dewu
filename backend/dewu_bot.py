@@ -1433,13 +1433,59 @@ class DewuBot:
             "最近修改" in self._page_text() or "销量排序" in self._page_text()
         ):
             return True
-        if d(text="货值计算").click_exists(timeout=2.0):
-            time.sleep(1.6)
+        w, h = d.window_size()
+        for _ in range(4):
+            self._check_cancel()
+            entries = [
+                n for n in self._xml_nodes(self._page_text())
+                if n.get("text") == "货值计算"
+                and 0 < n["cx"] < w and 0 < n["cy"] < h * 0.9
+            ]
+            if entries:
+                d.click(entries[0]["cx"], entries[0]["cy"])
+                self._sleep(1.6)
+                return True
+            # Seller dashboard content can push the tools below the bottom bar.
+            d.swipe(int(w * 0.5), int(h * 0.8), int(w * 0.5), int(h * 0.45), 0.3)
+            self._sleep(0.5)
+        return False
+
+    def _select_all_huozhi_products(self, progress: ProgressCb | None = None) -> bool:
+        """Do not inherit the merchant search's recorded-products filter."""
+        w, h = self.d.window_size()
+
+        def tabs() -> list[dict]:
+            return [
+                n for n in self._xml_nodes(self._page_text())
+                if n.get("text") in ("全部", "已录入商品")
+                and 0 <= n["cx"] < w and 0 <= n["cy"] < h * 0.3
+            ]
+
+        nodes = tabs()
+        if not nodes:
+            # Some versions show these filters only after submitting the search.
             return True
-        if d(textContains="货值计算").click_exists(timeout=1.0):
-            time.sleep(1.6)
+        all_tab = next((n for n in nodes if n.get("text") == "全部"), None)
+        if all_tab is None:
+            self._progress(progress, "huozhi_search", "未找到“全部”分类，停止货值搜索")
+            return False
+        if all_tab.get("selected") == "true":
             return True
-        return "货值计算" in self._page_text()
+
+        self._progress(progress, "huozhi_search", "切换货值搜索范围：全部商品")
+        self.d.click(all_tab["cx"], all_tab["cy"])
+        self._sleep(0.6)
+        # WebViews may omit selection state; reject an explicitly wrong state.
+        switched = self._wait_until(
+            lambda: not any(
+                n.get("text") == "已录入商品" and n.get("selected") == "true"
+                for n in tabs()
+            ),
+            timeout=2.0,
+        )
+        if not switched:
+            self._progress(progress, "huozhi_search", "无法切换到“全部”分类，停止货值搜索")
+        return switched
 
     def _search_huozhi_sku(self, sku: str, progress: ProgressCb | None = None) -> bool:
         d = self.d
@@ -1485,6 +1531,9 @@ class DewuBot:
                 return False
         time.sleep(0.4)
 
+        if not self._select_all_huozhi_products(progress):
+            return False
+
         # 注意：输入框内也有 text=搜索 的 Image（不可点），必须点右侧 TextView
         submitted = False
         btn = d(
@@ -1523,19 +1572,28 @@ class DewuBot:
                 btn.click()
                 time.sleep(1.4)
 
-        # 等到离开「历史记录」搜索页，出现结果或规格行情
-        for _ in range(12):
+        if not self._select_all_huozhi_products(progress):
+            return False
+
+        # Wait for an actual product, not the SKU echoed in the search input.
+        # Do not keep clicking the filter while its results are loading.
+        _, h = d.window_size()
+        for _ in range(20):
+            self._check_cancel()
             xml = self._page_text()
-            if "规格行情" in xml or "7日销量" in xml or "缺货" in xml:
+            if "规格行情" in xml or "7日销量" in xml:
                 return True
-            if "历史记录" not in xml and (
-                sku.replace("-", "")[:6] in xml.replace("-", "")
-                or "库存" in xml
-                or "立即出价" in xml
+            if "历史记录" not in xml and any(
+                self._sku_matches(sku, n.get("text", "").strip())
+                and n.get("class") != "android.widget.EditText"
+                and n.get("editable") != "true"
+                and h * 0.2 < n["cy"] < h
+                for n in self._xml_nodes(xml)
             ):
                 return True
-            time.sleep(0.45)
-        return "历史记录" not in self._page_text()
+            self._sleep(0.45)
+        self._progress(progress, "huozhi_search", "全部商品中未加载出匹配货号，停止读取销量")
+        return False
 
     def _open_first_huozhi_result(self, progress: ProgressCb | None = None) -> bool:
         d = self.d
@@ -1675,7 +1733,8 @@ class DewuBot:
         d = self.d
 
         # 确保在规格行情；默认已是 7 日，不要乱点「7日」（会点到汇总文案）
-        d(text="规格行情").click_exists(timeout=0.8)
+        if "规格销量排序" not in self._page_text():
+            self._tap_visible_node_text("规格行情", timeout=0.8)
         time.sleep(0.4)
 
         def absorb() -> int:
@@ -1692,6 +1751,7 @@ class DewuBot:
                     pass
             return len(merged) - before
 
+        absorb()
         # 先轻轻上滑露出「规格销量排序」
         d.swipe(int(w * 0.72), int(h * 0.70), int(w * 0.72), int(h * 0.45), 0.25)
         time.sleep(0.4)
